@@ -229,12 +229,6 @@ void pseudo_inverse(Matrix * A, Matrix * B)
     lapack_int info;
     lapack_int s_info;
 
-    // Apply frobenius regularization (1e-12)
-    // This helps stablity 
-    for (int i = 0; i < I; ++i) {
-        A->vals[i * I + i] += 1e-12;
-    }
-
     POTRF(&uplo, &I, A->vals, &I, &info);
 
     if (info != 0) {
@@ -264,6 +258,31 @@ void mat_aTa(
     SYRK(layout, uplo, trans, n, m, alpha, A->vals, lda, beta, ret->vals, ldc);
 }
 
+Matrix * hadamard_product(Matrix ** mats, IType nmodes, IType mode_to_exclude)
+{
+    // very basic assertions
+    assert(mats[0] != NULL);
+    assert(mats[0]->I == mats[0]->J);
+
+    IType rank = mats[0]->I;
+
+    Matrix * phi = init_mat(rank, rank);
+    for (int i = 0; i < rank * rank; ++i) {
+        phi->vals[i] = 1.0;
+    }
+
+    #pragma unroll
+    for(int i = 0; i < nmodes; ++i) {
+        if(i != mode_to_exclude) {
+            #pragma omp simd
+            for(int j = 0; j < rank * rank; j++) {
+                phi->vals[j] *= mats[i]->vals[j];
+            }
+        }
+    }
+    return phi;
+}
+
 FType mat_trace(Matrix * mat)
 {
     assert(mat->I == mat->J);
@@ -285,4 +304,20 @@ void mat_hydrate(Matrix * mat, FType * vals, IType nrows, IType ncols) {
     mat->I = nrows;
     mat->J = ncols;
     mat->vals = vals;
+}
+
+void mat_cholesky(Matrix * A) {
+    assert(A->I == A->J);
+    // Set up variables for POTRF call
+    char uplo = 'L';
+    lapack_int I = (lapack_int)A->I;
+    lapack_int info;
+    lapack_int s_info;
+
+    POTRF(&uplo, &I, A->vals, &I, &info);
+    if (info != 0) {
+        // Loud failure message
+        fprintf(stderr, "ALTO: Cholesky factorization failed. No fallback implemented!");
+        exit(1);
+    }
 }

@@ -59,8 +59,12 @@ void copy_upper_tri(Matrix * M);
 
 void pseudo_inverse(Matrix * A, Matrix * B);
 
+void mat_cholesky(Matrix * A);
+
 void mat_aTa(Matrix const * const A, Matrix * const ret);
  
+Matrix * hadamard_product(Matrix ** mats, IType nmodes, IType mode_to_exclude);
+
 FType mat_trace(Matrix * mat);
 
 

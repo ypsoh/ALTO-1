@@ -11,6 +11,8 @@
 #include "gram.hpp"
 #include "mttkrp.hpp"
 #include "rowsparse_mttkrp.hpp"
+#include "constraints.hpp"
+#include "admm.hpp"
 
 #include <vector>
 
@@ -33,6 +35,7 @@ struct sparse_cp_grams {
     Matrix ** c_prev;
 }; typedef struct sparse_cp_grams SparseCPGrams;
 
+
 // Signatures
 void cpstream(
     SparseTensor* X, 
@@ -41,16 +44,20 @@ void cpstream(
     int streaming_mode, 
     FType epsilon, 
     IType seed, 
+    cpd_constraint * con,
     bool use_alto,
     bool use_spcpstream);
 
-void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M, 
-    Matrix** grams, int max_iters, double epsilon, 
-    int streaming_mode, int iter, bool use_alto);
+void cpstream_iter(SparseTensor* X, KruskalModel* M, 
+    KruskalModel * prev_M, Matrix** grams, int max_iters, 
+    double epsilon, int streaming_mode, int iter, 
+    cpd_constraint * con, admm_ws * ws, bool use_alto);
 
-void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M, 
-    Matrix** grams, SparseCPGrams * scpgrams, int max_iters, double epsilon, 
-    int streaming_mode, int iter, bool use_alto);
+void spcpstream_iter(SparseTensor* X, KruskalModel* M, 
+    KruskalModel * prev_M, Matrix** grams, 
+    SparseCPGrams * scpgrams, int max_iters, double epsilon,
+    int streaming_mode, int iter, 
+    cpd_constraint * con, admm_ws * ws, bool use_alto);
 
 // More explicit version for streaming cpd
 void pseudo_inverse_stream(Matrix ** grams, KruskalModel* M, IType mode, IType stream_mode);

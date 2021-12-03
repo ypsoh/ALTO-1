@@ -19,6 +19,7 @@ void cpstream(
     int streaming_mode,
     FType epsilon,
     IType seed,
+    cpd_constraint * con,
     bool use_alto,
     bool use_spcpstream) {
 
@@ -26,7 +27,7 @@ void cpstream(
     uint64_t ts = 0;
     uint64_t te = 0;
     double t_preprocess = 0.0;
-    double t_iteration = 0.0;
+    double t_iter = 0.0;
     double t_postprocess = 0.0;
 
 
@@ -48,6 +49,9 @@ void cpstream(
     StreamMatrix * global_time = new StreamMatrix(rank);
 
     SparseCPGrams * scpgrams;
+
+    // Set up admm workspace
+    admm_ws * ws = admm_ws_init(nmodes);
     
     if (use_spcpstream) {
         // Hypersparse ALS specific
@@ -89,6 +93,21 @@ void cpstream(
                 }
             }
         }
+
+        // Setup ADMM workspace
+        // Change to StreamMatrix later on
+        int max_dim = 0;
+        for (int m = 0; m < nmodes; ++m) {
+          ws->duals[m] = init_mat(t_batch->dims[m], rank);
+          if (t_batch->dims[m] > max_dim) {
+            max_dim = t_batch->dims[m];
+          }
+        }
+        fprintf(stderr, "max dim: %d\n", max_dim);
+        ws->mttkrp_buf = init_mat(max_dim, rank);
+        ws->auxil = init_mat(max_dim, rank);
+        ws->mat_init = init_mat(max_dim, rank);
+
 #if TIMER == 1
         END_TIMER(&te);
         ELAPSED_TIME(ts, te, &t_preprocess);
@@ -100,7 +119,7 @@ void cpstream(
         if (use_spcpstream) {
             spcpstream_iter(
               t_batch, M, prev_M, grams, scpgrams,
-              max_iters, epsilon, streaming_mode, it, use_alto);
+              max_iters, epsilon, streaming_mode, it, con, ws, use_alto);
         }
         else {
             // TODO: Can convert it to ALTO outside of the iter function
@@ -108,11 +127,11 @@ void cpstream(
             // Set s_t to the latest row of global time stream matrix
             cpstream_iter(
                 t_batch, M, prev_M, grams,
-                max_iters, epsilon, streaming_mode, it, use_alto);
+                max_iters, epsilon, streaming_mode, it, con, ws, use_alto);
         }
 #if TIMER == 1
         END_TIMER(&te);
-        ELAPSED_TIME(ts, te, &t_iteration);
+        ELAPSED_TIME(ts, te, &t_iter);
 #endif
         ++it; // increment of it has to precede global_time memcpy
 
@@ -132,7 +151,7 @@ void cpstream(
 
 #if TIMER == 1
     fprintf(stderr, "timing CPSTREAM (#it, pre, iter, post)\n");
-    fprintf(stderr, "%d\t%f\t%f\t%f\n", it, t_preprocess, t_iteration, t_postprocess);
+    fprintf(stderr, "%d\t%f\t%f\t%f\n", it, t_preprocess, t_iter, t_postprocess);
 #endif
     }
     // Step N: Compute final fit
@@ -175,14 +194,13 @@ void cpstream(
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-void cpstream_iter(
-  SparseTensor* X, KruskalModel* M, KruskalModel* prev_M, Matrix** grams,
-  int max_iters, double epsilon,
-  int streaming_mode, int iteration, bool use_alto)
+void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M, 
+    Matrix** grams, int max_iters, double epsilon, 
+    int streaming_mode, int iter, cpd_constraint * con, admm_ws * ws, bool use_alto)
 {
     fprintf(stderr,
-        "Running CP-Stream (%s, iter: %d) with %d max iterations and %.2e epsilon\n",
-        use_alto ? "ALTO" : "Non ALTO", iteration, max_iters, epsilon);
+        "Running CP-Stream (%s, iter: %d) with %d max iters and %.2e epsilon\n",
+        use_alto ? "ALTO" : "Non ALTO", iter, max_iters, epsilon);
 
     // Timing stuff
     uint64_t ts = 0;
@@ -252,7 +270,7 @@ void cpstream_iter(
     }
 
     // REFACTOR: This should go outside of inner iteraion
-    if (iteration == 0) {
+    if (iter == 0) {
         for (int m = 0; m < nmodes; ++m) {
             if (m == streaming_mode) continue;
             KruskalModelNorm(M, m, MAT_NORM_2, lambda_sp);
@@ -283,23 +301,26 @@ void cpstream_iter(
     }
 
     // keep track of delta for convergence check
-    double delta = 0.0;
-    double prev_delta = 0.0;
+    double delta = 0.0, prev_delta = 0.0;
+    double delta_diff =  0.0, prev_delta_diff = 0.0;
 
     Matrix * old_gram = zero_mat(rank, rank);
+
+    fprintf(stderr,  "wassup\n");
 
     int tmp_iter = 0;
     for(int i = 0; i < max_iters; i++) {
         delta = 0.0;
+        delta_diff = 0.0;
         // Solve for time mode (s_t)
         // set to zero
-        memset(M->U[streaming_mode], 0, sizeof(FType) * rank);
+        memset(ws->mttkrp_buf->vals, 0, sizeof(FType) * rank);
         BEGIN_TIMER(&ts);
         if (use_alto) {
             mttkrp_alto_par(streaming_mode, M->U, rank, AT, NULL, ofibs);
         }
         else {
-            mttkrp_par(X, M, streaming_mode, writelocks);
+            mttkrp_par(X, M, streaming_mode, writelocks, ws);
         }
         END_TIMER(&te);
         AGG_ELAPSED_TIME(ts, te, &t_mttkrp_sm);
@@ -310,8 +331,10 @@ void cpstream_iter(
 
         BEGIN_TIMER(&ts);
         // Init gram matrix aTa for all other modes
-        pseudo_inverse_stream(
-          grams, M, streaming_mode, streaming_mode);
+        
+        // pseudo_inverse_stream(
+        //   grams, M, streaming_mode, streaming_mode);
+        admm(streaming_mode, M, grams, NULL, con, ws);
         END_TIMER(&te);
         AGG_ELAPSED_TIME(ts, te, &t_bs_sm);
 
@@ -345,7 +368,8 @@ void cpstream_iter(
             if (j == streaming_mode) continue;
 
             BEGIN_TIMER(&ts);
-            memset(M->U[j], 0, sizeof(FType) * dims[j] * rank);
+            memset(ws->mttkrp_buf->vals, 0, sizeof(FType) * dims[j] * rank);
+
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_memset);
 
@@ -361,7 +385,7 @@ void cpstream_iter(
             if (use_alto) {
                 mttkrp_alto_par(j, M->U, rank, AT, NULL, ofibs);
             } else {
-                mttkrp_par(X, M, j, writelocks);
+                mttkrp_par(X, M, j, writelocks, ws);
             }
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_mttkrp_om);
@@ -407,7 +431,10 @@ void cpstream_iter(
             memset(str, 0, 512);
 #endif
 
-            matmul(prev_M->U[j], false, ata_buf->vals, false, M->U[j], prev_M->dims[j], rank, rank, rank, 1.0);
+            // matmul(prev_M->U[j], false, ata_buf->vals, false, 
+            //   M->U[j], prev_M->dims[j], rank, rank, rank, 1.0);
+            matmul(prev_M->U[j], false, ata_buf->vals, false, 
+              ws->mttkrp_buf->vals, prev_M->dims[j], rank, rank, rank, 1.0);
 
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_add_historical);
@@ -417,15 +444,13 @@ void cpstream_iter(
             PrintFPMatrix(str, M->U[j], M->dims[j], rank);
             memset(str, 0, 512);
 #endif
-
             BEGIN_TIMER(&ts);
-            pseudo_inverse_stream(
-                grams, M, j, streaming_mode);
+            admm(j, M, grams, NULL, con, ws);
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_bs_om);
 
 #if DEBUG == 1
-            sprintf(str, "ts: %d, it: %d: updated factor matrix for mode %d", iteration, i, j);
+            sprintf(str, "ts: %d, it: %d: updated factor matrix for mode %d", iter, i, j);
             PrintFPMatrix(str, M->U[j], M->dims[j], rank);
             memset(str, 0, 512);
 #endif
@@ -451,11 +476,23 @@ void cpstream_iter(
 #if 1
         fprintf(stderr, "it: %d delta: %e prev_delta: %e (%e diff)\n", i, delta, prev_delta, fabs(delta - prev_delta));
 #endif
-        if ((i > 0) && fabs(prev_delta - delta) < epsilon) {
-            prev_delta = 0.0;
-            break;
-        } else {
-            prev_delta = delta;
+        delta_diff = fabs(prev_delta - delta);
+
+        if ((i > 0) && delta_diff < epsilon) {
+          prev_delta = 0.0;
+          prev_delta_diff = 0.0;
+          break;
+        } 
+#if EARLY_TERMINATION        
+        else if ((i > 0) && fabs(prev_delta_diff-delta_diff) < epsilon*0.1) {
+          prev_delta = 0.0;
+          prev_delta_diff = 0.0;
+          break;
+        } 
+#endif
+        else {
+          prev_delta = delta;
+          prev_delta_diff = delta_diff;
         }
     } // for max_iters
 
@@ -481,7 +518,7 @@ void cpstream_iter(
     fprintf(stderr, "timing CPSTREAM-ITER\n");
     fprintf(stderr, "#ts\t#nnz\t#it\talto\tmttkrp_sm\tbs_sm\tmem set\tmttkrp_om\thist\tbs_om\tupd_gram\tconv_check\n");
     fprintf(stderr, "%d\t%llu\t%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n", 
-        iteration+1, X->nnz, num_inner_iter+1, 
+        iter+1, X->nnz, num_inner_iter+1, 
         t_alto, t_mttkrp_sm, t_bs_sm, 
         t_memset, t_mttkrp_om, t_add_historical, 
         t_bs_om, t_gram_mat, t_conv_check);
@@ -538,9 +575,9 @@ vector<size_t> zero_slices(const IType I, vector<size_t> &nz_rows)
   return zero_slices;
 }
 
-void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
-    Matrix** grams, SparseCPGrams* scpgrams, int max_iters, double epsilon,
-    int streaming_mode, int iteration, bool use_alto)
+void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M, 
+    Matrix** grams, SparseCPGrams * scpgrams, int max_iters, double epsilon, 
+    int streaming_mode, int iter, cpd_constraint * con, admm_ws * ws, bool use_alto)
 {
   /* Timing stuff */
   uint64_t ts = 0;
@@ -593,7 +630,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
   int num_inner_iter = 0;
   // keep track of the fit for convergence check
   double fit = 0.0, prev_fit = 0.0, delta = 0.0, prev_delta = 0.0;
-
+  double delta_diff =  0.0, prev_delta_diff = 0.0;
   // Used to store non_zero row informatoin for all modes
   vector<vector<size_t>> nz_rows((size_t)nmodes, vector<size_t> (0, 0));
   vector<vector<size_t>> buckets((size_t)nmodes, vector<size_t> (0, 0));
@@ -606,7 +643,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
   Matrix * old_gram = zero_mat(rank, rank);
 
   // Needed to formulate full-sized factor matrix within the convergence loop
-  // The zero rows still change inbetween iterations due to Q and Phi changing
+  // The zero rows still change inbetween iters due to Q and Phi changing
   RowSparseMatrix ** A_nz = (RowSparseMatrix**) AlignedMalloc(nmodes * sizeof(RowSparseMatrix*));
   RowSparseMatrix ** A_nz_prev = (RowSparseMatrix**) AlignedMalloc(nmodes * sizeof(RowSparseMatrix*));
 
@@ -677,8 +714,8 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
   PrintSparseTensor(X);
 #endif
 
-  // ==== Step 0. ==== Normalize factor matrices for first iteration
-  if (iteration == 0) {
+  // ==== Step 0. ==== Normalize factor matrices for first iter
+  if (iter == 0) {
       for (int m = 0; m < nmodes; ++m) {
           if (m == streaming_mode) continue;
           KruskalModelNorm(M, m, MAT_NORM_2, lambda_sp);
@@ -732,7 +769,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 
   BEGIN_TIMER(&ts);
   // ==== Step 2. ==== Compute c_z_prev using c_prev, c_nz_prev - it > 0
-  if (iteration > 0) {
+  if (iter > 0) {
     for (IType m = 0; m < nmodes; ++m) {
       if (m == streaming_mode) continue;
       Matrix _fm;
@@ -764,11 +801,11 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
   END_TIMER(&te);
   AGG_ELAPSED_TIME(ts, te, &t_mat_conversion);
 
-  // ==== Step 4. ==== Inner iteration for-loop
-  int tmp_iter = 0; // To log number of iterations until convergence
+  // ==== Step 4. ==== Inner iter for-loop
+  int tmp_iter = 0; // To log number of iters until convergence
   for (int i = 0; i < max_iters; i++) {
-    delta = 0.0; // Reset to 0.0 for every iteration
-
+    delta = 0.0; // Reset to 0.0 for every iter
+    delta_diff = 0.0;
     // ==== Step 4-1. ===== Compute s_t
     FType * s_t = A_nz[streaming_mode]->mat->vals;
     memset(s_t, 0, rank * sizeof(FType));
@@ -849,7 +886,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 
 #if DEBUG == 1
       memset(_str, 0, 512);
-      sprintf(_str, "Before mttkrp: %d, A_nz[%d]", iteration, m);
+      sprintf(_str, "Before mttkrp: %d, A_nz[%d]", iter, m);
       PrintRowSparseMatrix(_str, A_nz[m]);
 #endif
 
@@ -873,7 +910,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 
 #if DEBUG == 1
       memset(_str, 0, 512);
-      sprintf(_str, "After mttkrp: %d, A_nz[%d]", iteration, m);
+      sprintf(_str, "After mttkrp: %d, A_nz[%d]", iter, m);
       PrintRowSparseMatrix(_str, mttkrp_res);
 
       for (int mm = 0; mm < nmodes; ++mm) {
@@ -886,7 +923,7 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
       // fprintf(stderr, "add_hist\n");      
       BEGIN_TIMER(&ts);
       // ==== Step 4-3-3 ==== Add historical (mttkrp_res + A_nz_prev[m] * Q[m])
-      // TODO: ????? Do we update A_nz_prev between iterations or is A_nz_prev static for
+      // TODO: ????? Do we update A_nz_prev between iters or is A_nz_prev static for
       // current time slice
       RowSparseMatrix * A_nz_prev_Q = rsp_mat_mul(A_nz_prev[m], Q);
       rsp_mat_add(mttkrp_res, A_nz_prev_Q);
@@ -966,15 +1003,23 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
     tmp_iter = i;
     fprintf(stderr, "it: %d delta: %e prev_delta: %e (%e diff)\n", i, delta, prev_delta, fabs(delta - prev_delta));
 
-    if ((i > 0) && fabs(prev_delta - delta) < epsilon) {
+    delta_diff = fabs(prev_delta - delta);
+
+    if ((i > 0) && delta_diff < epsilon) {
       prev_delta = 0.0;
+      prev_delta_diff = 0.0;
+      break;
+    } else if ((i > 0) && fabs(prev_delta_diff-delta_diff) < epsilon*0.1) {
+      prev_delta = 0.0;
+      prev_delta_diff = 0.0;
       break;
     } else {
       prev_delta = delta;
+      prev_delta_diff = delta_diff;
     }
   } // end for loop: max_iters
 
-  num_inner_iter += tmp_iter; // track number of iterations per time-slice
+  num_inner_iter += tmp_iter; // track number of iters per time-slice
 
   // ==== Step 5. ==== Update factor matrices M->U[m]
   for (int m = 0; m < nmodes; ++m) {
@@ -1062,15 +1107,13 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
   fprintf(stdout, "timing SPCPSTREAM-ITER\n");
   fprintf(stdout, "#ts\t#nnz\t#it\talto\tmttkrp_sm\tbs_sm\tmemset\tmttkrp_om\thist\tbs_om\tupd_gram\tconv_check\trow op\tmat conv\tupd fm\n");
   fprintf(stdout, "%d\t%llu\t%d\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\t%f\n", 
-      iteration+1, X->nnz, num_inner_iter+1, 
+      iter+1, X->nnz, num_inner_iter+1, 
       t_alto, t_mttkrp_sm, t_bs_sm, 
       t_memset, t_mttkrp_om, t_add_historical, 
       t_bs_om, t_gram_mat, t_conv_check, 
       t_row_op, t_mat_conversion, t_upd_fm);
   return;
 };
-
-
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // Need a separate version so that we can selectively apply frob reg to stream mode only
@@ -1080,12 +1123,12 @@ static void pseudo_inverse_stream(
   IType rank = M->rank;
   IType nmodes = (IType) M->mode;
 
-    // Instantiate Phi = ((*) AtA) (*) Time
-    Matrix * Phi = zero_mat(rank, rank);
+  // Instantiate Phi = ((*) AtA) (*) Time
+  Matrix * Phi = init_mat(rank, rank);
 
-    for (int i = 0; i < rank * rank; ++i) {
-      Phi->vals[i] = 1.0;
-    }
+  for (int i = 0; i < rank * rank; ++i) {
+    Phi->vals[i] = 1.0;
+  }
 
   // Calculate V
   IType m = 0;
@@ -1115,12 +1158,6 @@ static void pseudo_inverse_stream(
   for (int r = 0; r < rank; ++r) {
     Phi->vals[r * rank + r] += 1e-12;
   }
-
-// if (mode == stream_mode) {
-//   for (int r = 0; r < rank; ++r) {
-//     Phi->vals[r * rank + r] += 1e-3;
-//   }
-// }
 
 #if DEBUG == 1
     PrintMatrix("before cholesky or factorization", Phi);

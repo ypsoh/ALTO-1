@@ -1,5 +1,6 @@
 #include "mttkrp.hpp"
 #include <assert.h>
+
 void mttkrp_par(SparseTensor* X, KruskalModel* M, IType mode, omp_lock_t* writelocks)
 {
   IType nmodes = X->nmodes;
@@ -43,7 +44,60 @@ void mttkrp_par(SparseTensor* X, KruskalModel* M, IType mode, omp_lock_t* writel
       omp_unset_lock(&(writelocks[row_id]));
     } // for each nonzero
   } // #pragma omp parallel
+  // free memory
+  free(rows);
+}
 
+/**
+ * Parallel mttkrp impelmentation that uses admm workspace
+ */
+
+void mttkrp_par(SparseTensor* X, KruskalModel* M, IType mode, omp_lock_t* writelocks, admm_ws * ws)
+{
+
+  IType nmodes = X->nmodes;
+  IType nnz = X->nnz;
+  IType** cidx = X->cidx;
+  IType rank = M->rank;
+
+  FType * mttkrp_buf_vals = ws->mttkrp_buf->vals;
+
+  int max_threads = omp_get_max_threads();
+  FType* rows = (FType*) AlignedMalloc(sizeof(FType) * rank * max_threads);
+  assert(rows);
+
+  #pragma omp parallel
+  {
+    // get thread ID
+    int tid = omp_get_thread_num();
+    FType* row = &(rows[tid * rank]);
+
+    #pragma omp for schedule(static)
+    for(IType i = 0; i < nnz; i++) {
+      // initialize temporary accumulator
+      for(IType r = 0; r < rank; r++) {
+        row[r] = X->vals[i];
+      }
+
+      // calculate mttkrp for the current non-zero
+      for(IType m = 0; m < nmodes; m++) {
+        if(m != mode) {
+          IType row_id = cidx[m][i];
+          for(IType r = 0; r < rank; r++) {
+            row[r] *= M->U[m][row_id * rank + r];
+          }
+        }
+      }
+      // update destination row
+      IType row_id = cidx[mode][i];
+      omp_set_lock(&(writelocks[row_id]));
+      for(IType r = 0; r < rank; r++) {
+        mttkrp_buf_vals[row_id * rank + r] += row[r];
+      }
+
+      omp_unset_lock(&(writelocks[row_id]));
+    } // for each nonzero
+  } // #pragma omp parallel
 
   // free memory
   free(rows);
@@ -84,3 +138,4 @@ void mttkrp(SparseTensor* X, KruskalModel* M, IType mode)
 
   // PrintFPMatrix("MTTKRP", dims[mode], rank, M->U[mode], rank);
 }
+
