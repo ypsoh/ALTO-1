@@ -103,7 +103,6 @@ void cpstream(
             max_dim = t_batch->dims[m];
           }
         }
-        fprintf(stderr, "max dim: %d\n", max_dim);
         ws->mttkrp_buf = init_mat(max_dim, rank);
         ws->auxil = init_mat(max_dim, rank);
         ws->mat_init = init_mat(max_dim, rank);
@@ -306,8 +305,6 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 
     Matrix * old_gram = zero_mat(rank, rank);
 
-    fprintf(stderr,  "wassup\n");
-
     int tmp_iter = 0;
     for(int i = 0; i < max_iters; i++) {
         delta = 0.0;
@@ -329,14 +326,20 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
         PrintFPMatrix("mttkrp before s_t", M->U[streaming_mode], 1, rank);
 #endif
 
+        PrintFPMatrix("s_t: before solve", M->U[streaming_mode], rank, 1);
+
         BEGIN_TIMER(&ts);
         // Init gram matrix aTa for all other modes
         
         // pseudo_inverse_stream(
         //   grams, M, streaming_mode, streaming_mode);
+        fprintf(stderr, "right before admm\n");
         admm(streaming_mode, M, grams, NULL, con, ws);
+        fprintf(stderr, "right after admm\n");
         END_TIMER(&te);
         AGG_ELAPSED_TIME(ts, te, &t_bs_sm);
+
+        PrintFPMatrix("s_t: after solve", M->U[streaming_mode], rank, 1);
 
 #if DEBUG == 1
         PrintFPMatrix("s_t: after solve", M->U[streaming_mode], rank, 1);
@@ -830,7 +833,10 @@ void spcpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
     memcpy(M->U[streaming_mode], A_nz[streaming_mode]->mat->vals, rank * sizeof(FType));
 
     BEGIN_TIMER(&ts);
-    pseudo_inverse_stream(c /* used to be grams */, M, streaming_mode, streaming_mode);
+    admm(streaming_mode, M, c, NULL, con, ws);
+
+    // pseudo_inverse_stream(c /* used to be grams */, M, streaming_mode, streaming_mode);
+
     END_TIMER(&te);
     AGG_ELAPSED_TIME(ts, te, &t_bs_sm);
 

@@ -174,7 +174,7 @@ void PrintFPMatrix(char *name, FType * a, size_t m, size_t n)
     for (size_t i = 0; i < m; i++) {
         fprintf(stderr, "[");
         for (size_t j = 0; j < n; j++) {
-        	fprintf(stderr,"%e", a[i * n + j]);
+        	fprintf(stderr,"%f", a[i * n + j]);
           if (j != n-1) fprintf(stderr, ", ");
           if (j == n-1) fprintf(stderr, "],");
         }
@@ -294,18 +294,31 @@ FType mat_trace(Matrix * mat)
     return tr;
 }
 
+/**
+ * @brief
+ * Returns a separate copy of Matrix * given predetermined values
+ * Refer to `mat_hydrate` also
+ */
 Matrix * mat_fillptr(FType * vals, IType nrows, IType ncols) {
     Matrix * mat = init_mat(nrows, ncols);
     memcpy(mat->vals, vals, nrows * ncols * sizeof(FType));
     return mat;
 }
 
+/**
+ * @brief
+ * Given a Matrix *, fills values and dimensions with predetermined values
+ */
 void mat_hydrate(Matrix * mat, FType * vals, IType nrows, IType ncols) {
     mat->I = nrows;
     mat->J = ncols;
     mat->vals = vals;
 }
 
+/**
+ * @brief
+ * Performs Cholesky factorization on A
+ */
 void mat_cholesky(Matrix * A) {
     assert(A->I == A->J);
     // Set up variables for POTRF call
@@ -317,7 +330,29 @@ void mat_cholesky(Matrix * A) {
     POTRF(&uplo, &I, A->vals, &I, &info);
     if (info != 0) {
         // Loud failure message
-        fprintf(stderr, "ALTO: Cholesky factorization failed. No fallback implemented!");
+        fprintf(stderr, "ALTO: Cholesky factorization failed. No fallback implemented!\n");
+        exit(1);
+    }
+}
+
+/**
+ * @brief
+ * Solves AX=B using Cholesky factorization where A is already factorized
+ * Solution is updated in B
+ */
+void mat_cholesky_solve(Matrix * A, Matrix * B) {
+    assert(A->I == B->J);
+    // Set up variables for POTRS call
+    char uplo = 'L';
+    lapack_int I = (lapack_int)A->I;    
+    lapack_int J = (lapack_int)B->I;
+    lapack_int info;
+
+    POTRS(&uplo, &I, &J, A->vals, &I,
+        B->vals, &I, &info);  
+    if (info != 0) {
+        // Loud failure message
+        fprintf(stderr, "ALTO: Cholesky solve failed. No fallback implemented!\n");
         exit(1);
     }
 }

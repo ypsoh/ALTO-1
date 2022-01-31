@@ -109,95 +109,105 @@ FType admm(
     // Constrained version
     FType rho = mat_trace(Phi) / (FType) rank;
     
+    // Debug
+    PrintMatrix("Phi matrix", Phi);
     for (int i = 0; i < rank; ++i) {
         Phi->vals[i * rank + i] += rho;
+        // Phi->vals[i * rank + i] += 1e-12;
     }
 
+    // Perform cholesky only once
     mat_cholesky(Phi);
 
-    /* for checking convergence */
-    FType primal_norm     = 0.;
-    FType dual_norm       = 0.;
-    FType primal_residual = 0.;
-    FType dual_residual   = 0.;
-    
-    Matrix * mat_init = ws->mat_init;
-    // Matrix * mttkrp_buf = ws->mttkrp_buf;
-    Matrix * auxil = ws->auxil;
-    Matrix * duals[MAX_NUM_MODES];
-    Matrix * primal;
+    // Step 1. Set up matrix values used for admm
+    FType * auxil = ws->auxil->vals;
+    FType * mttkrp = mttkrp_buf->vals;
+    FType * dual = ws->duals[mode]->vals;
+    FType * mat_init = ws->mat_init->vals;
 
-    mat_hydrate(primal, M->U[mode], M->dims[mode], rank);
+    // Matrix * factor_matrix = mat_fillptr(M->U[mode], M->dims[mode], rank);
+    Matrix * factor_matrix = (Matrix *)malloc(sizeof(Matrix));
+    mat_hydrate(factor_matrix, M->U[mode], M->dims[mode], rank);
+    // Matrix * factor_matrix = mat_fillptr(M->U[mode], M->dims[mode], rank);
 
-    for (int m = 0; m < nmodes; ++m) {
-        duals[m] = ws->duals[m];
-    }
-    
-    size_t bytes = sizeof(FType) * rank * M->dims[mode];
-    for (int it = 0; it < 100; ++it) {
-        // save starting point for convergence check
-        // copy factor matrix for init_mat
-        memcpy(mat_init->vals, primal->vals, bytes);
-    }
+    FType * primal = factor_matrix->vals;
 
-/*
-    // Compute number of chunks
-    IType num_chunks = 1;
-    IType const chunk_size = 50; // set statically
-    if(chunk_size > 0) {
-        num_chunks =  M->dims[mode] / chunk_size;
-        if(M->dims[mode] % chunk_size > 0) {
-            ++num_chunks;
+    int N = M->dims[mode] * rank;
+
+    size_t bytes = N * sizeof(*primal);
+
+    // Set up norm
+    FType primal_norm = 0.0;
+    FType dual_norm = 0.0;
+    FType primal_residual = 0.0;
+    FType dual_residual = 0.0;
+
+    // ADMM subroutine
+    IType it;
+    for (it = 0; it < 25; ++it) {
+        memcpy(mat_init, primal, bytes);
+        // Setup auxiliary
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < N; ++i) {
+            auxil[i] = mttkrp[i] + rho * (primal[i] + dual[i]);
+        }
+
+        // Cholesky solve
+        mat_cholesky_solve(Phi, ws->auxil);
+
+        // Setup proximity
+        #pragma omp parallel for schedule(static)
+        for (int i = 0; i < N; ++i) {
+            primal[i] = auxil[i] - dual[i];
+        }
+
+        PrintMatrix("factor matrix after constraint", factor_matrix);
+        // Apply Constraints and Regularization
+        // PrintFPMatrix("primal before", primal, factor_matrix->I, factor_matrix->J);
+        con->func(primal, factor_matrix->I, factor_matrix->J);
+        // PrintFPMatrix("primal after", primal, factor_matrix->I, factor_matrix->J);
+        // Update dual: U += (primal - auxil)
+        FType dual_norm = 0.0;
+
+        #pragma omp parallel for schedule(static) reduction(+:dual_norm)
+        for (int i = 0; i < N; ++i) {
+            dual[i] += primal[i] - auxil[i];
+            dual_norm += dual[i] * dual[i];
+        }
+        
+        int nrows = factor_matrix->I;
+        int ncols = factor_matrix->J;
+
+        primal_norm = 0.0;
+        primal_residual = 0.0;
+        dual_residual = 0.0;
+
+        // Check ADMM convergence, calc residual
+        // We need primal_norm, primal_residual, dual_residual
+        #pragma omp parallel for reduction(+:primal_norm, primal_residual, dual_residual)
+        for (int i = 0; i < nrows; ++i) {
+            for (int j = 0; j < ncols; ++j) {
+                int index = j + (i * ncols);
+                FType p_diff = primal[index] - auxil[index];
+                FType d_diff = primal[index] - mat_init[index];
+
+                primal_norm += primal[index] * primal[index];
+                primal_residual += p_diff * p_diff;
+                dual_residual += d_diff * d_diff;
+            }
+        }
+
+        fprintf(stderr, "p_res, p_norm, d_res, d_nrom, %f, %f, %f, %f\n", primal_residual, primal_norm, dual_residual, dual_norm);
+        // Converged ?
+        if ((primal_residual <= 0.07 * primal_norm) && (dual_residual <= 0.07 * dual_norm)) {
+            ++it;
+            break;
         }
     }
 
-    IType it = 0;
-    #pragma omp parallel for schedule(dynamic) reduction(+:it) if(num_chunks > 1)
-    for(IType c=0; c < num_chunks; ++c) {
-        IType const start = c * chunk_size;
-        IType const stop = (c == num_chunks-1) ? mats[mode]->I : (c+1)*chunk_size;
-        IType const offset = start * rank;
-        IType const nrows = stop - start;
-
-
-        //admm workspace, just for dev, definitely refactor later
-         
-
-        //sub-matrix chunks 
-        Matrix primal;
-        Matrix auxil;
-        Matrix dual;
-        Matrix mttkrp;
-        Matrix init_buf;
-
-        // Auxil matrix for AO-ADMM factorization
-        // Dual (factor) matrixes for AO-ADMM factorization
-        // Store mttkrp results
-        // Init primal variable for each ADMM iteration
-
-        // extract all the workspaces
-
-        mat_hydrate(&primal, mats[mode]->vals + offset, nrows, rank);
-        mat_hydrate(&auxil, ws->auxil->vals + offset, nrows, rank);
-        mat_hydrate(&dual, ws->duals[mode]->vals + offset, nrows, rank);
-        mat_hydrate(&mttkrp, ws->mttkrp_buf->vals + offset, nrows, rank);
-        mat_hydrate(&init_buf, ws->mat_init->vals + offset, nrows, rank);
-
-        // should the ADMM kernels parallelize themselves?
-        bool const should_parallelize = (num_chunks == 1);
-
-        //Run ADMM until convergence and record total ADMM its per row
-        IType const chunk_iters =  p_admm_iterate_chunk(&primal, &auxil, &dual,
-            ws->gram, &mttkrp, &init_buf, mode, con, rho, ws, cpd_opts,
-            global_opts, should_parallelize);
-        it += chunk_iters * nrows;
-    } // foreach chunk
-*/
-    free_mat(Phi);
-    /* return average # iterations */
-    // return (FType) it / (FType) mats[mode]->I;
-    return 0.0;
-
+    fprintf(stderr, "it: %d\n", it);
+    return it;
+    // return 0.0;
 }
 
 admm_ws * admm_ws_init(int nmodes) {

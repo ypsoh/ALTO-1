@@ -15,7 +15,7 @@ void constraint_nonneg(
 {
     #pragma omp parallel for
     for (IType i = 0; i < nrows; ++i) {
-        for (IType j = 0; j < ncols; ++i) {
+        for (IType j = 0; j < ncols; ++j) {
             IType idx = j + (i * ncols);
             primal[idx] = (primal[idx] > 0.0) ? primal[idx] : 0.0;
         }

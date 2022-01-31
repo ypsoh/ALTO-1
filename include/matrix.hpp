@@ -60,6 +60,7 @@ void copy_upper_tri(Matrix * M);
 void pseudo_inverse(Matrix * A, Matrix * B);
 
 void mat_cholesky(Matrix * A);
+void mat_cholesky_solve(Matrix * A, Matrix * B);
 
 void mat_aTa(Matrix const * const A, Matrix * const ret);
  
