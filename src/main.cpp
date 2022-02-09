@@ -378,6 +378,135 @@ int main(int argc, char** argv)
 
 		// Get kruskal model for final factorization
 		return 0;
+
+		// Set up timers
+		double t_create_alto = 0.0;
+		double t_cpstream = 0.0;
+		double t_copy_factor_matrices = 0.0;
+
+		double tot_create_alto = 0.0;
+		double tot_cpstream = 0.0;
+		double tot_copy_factor_matrices = 0.0;
+		
+		double t_preprocess_tensor = 0.0;
+		printf("Processing Streaming Sparse Tensor\n");
+		
+		BEGIN_TIMER(&ticks_start);
+		StreamingSparseTensor sst(X, streaming_mode);
+		END_TIMER(&ticks_end);
+
+		ELAPSED_TIME(ticks_start, ticks_end, &t_preprocess_tensor);
+		PRINT_TIMER("Preprocessing Streaming Tensor", t_preprocess_tensor);
+		
+		printf("Streaming mode: %d\n", sst._stream_mode);
+		printf("Streaming tensor nnz: %llu\n",sst._tensor->nnz);
+
+		int it = 0;  // Keeps track of time iterations
+		KruskalModel * M; // Keeps track of current factor matrices
+		KruskalModel * prev_M; // Keeps track of previous factor matrices
+		
+		Matrix ** grams;
+		
+		// concatencated s_t's
+		Matrix * global_time = zero_mat(1, rank);
+
+#if DEBUG == 1
+		while(!sst.last_batch() && it < 5) { // While we stream streaming tensor
+#else
+		while(!sst.last_batch()) { // While we stream streaming tensor
+#endif		
+			SparseTensor * t_batch = sst.next_batch();
+			// ExportSparseTensor(NULL, TEXT_FORMAT, t_batch);
+			
+			BEGIN_TIMER(&ticks_start);
+			// Create kruskal models accordingly - The factor matrices are stored in kruskal model form
+			if (it == 0) {
+				// For the first iteration, create initial kruskal model
+				CreateKruskalModel(t_batch->nmodes, t_batch->dims, rank, &M);
+				CreateKruskalModel(t_batch->nmodes, t_batch->dims, rank, &prev_M);
+				
+				KruskalModelRandomInit(M, (unsigned int)seed);
+				KruskalModelZeroInit(prev_M);
+				
+				// Override values for M->U[stream_mode] with last row of global_time matrix
+				M->U[streaming_mode] = &(global_time->vals[it*rank]);
+
+				init_grams(&grams, M);
+			} else {
+				GrowKruskalModel(t_batch->dims, &M, FILL_RANDOM, seed); // Expands the kruskal model to accomodate new dimensions
+				GrowKruskalModel(t_batch->dims, &prev_M, FILL_ZEROS, seed); // Expands the kruskal model to accomodate new dimensions
+				for (int j = 0; j < M->mode; ++j) {
+					if (j != streaming_mode) {
+						update_gram(grams[j], M, j);
+					}
+				}
+			}
+
+			END_TIMER(&ticks_end);
+			ELAPSED_TIME(ticks_start, ticks_end, &t_copy_factor_matrices);
+			tot_copy_factor_matrices += t_copy_factor_matrices;
+
+			/*
+			printf("Time dim dimensions %d has size: %d\n", streaming_mode, M->dims[streaming_mode]);
+			printf("Iteration : %d\n", it);
+			for (int m = 0; m < t_batch->nmodes; ++m) {
+				printf(" Dim %d size: %llu\n", m, t_batch->dims[m]);
+				printf("Factor matrix for mode %d dimensions: %d\n", m, M->dims[m]);
+			}
+			*/
+
+			PrintTensorInfo(rank, max_iters, t_batch);
+
+			/*
+			Decomposing the Streaming CPD portion of the code (Keep track of cumulative time consumed)
+			1. Computing factor matrix for streaming mode (MTTKRP, Pseudo inverse)
+			2. Computing factor matrix for all other modes (MTTKRP, Pseudo inverse)
+			3. Computing fit
+			4. Computing auxiliary stuff (aTa)
+			*/
+
+			// Printing Kruskal Models
+			// PrintKruskalModel(M);
+			// PrintKruskalModel(prev_M);
+
+			ELAPSED_TIME(ticks_start, ticks_end, &t_cpstream);
+			tot_cpstream += t_cpstream;
+			// PrintKruskalModel(M);
+
+			/*BEGIN_TIMER(&ticks_start);
+			cpd(X, M, max_iters, epsilon);
+			END_TIMER(&ticks_end);
+			ELAPSED_TIME(ticks_start, ticks_end, &t_cpd);
+			PRINT_TIMER("CPD (COO)", t_cpd);
+			*/
+			
+			// If text_file_out is specified it is implied that we're using checkpoints
+
+
+			CopyKruskalModel(&prev_M, &M);
+
+			PRINT_TIMER("Copy factor matrices", tot_copy_factor_matrices);
+			PRINT_TIMER("Create Alto", tot_create_alto);
+			PRINT_TIMER("Streaming CPD", tot_cpstream);
+
+			// Cleanup
+			DestroySparseTensor(t_batch);
+#if ALTO_CPSTREAM==1
+			destroy_alto(AT);
+#else
+#endif
+			// DestroyKruskalModel(M);
+			// destroy_alto(AT);
+			++it; // Increase iteration
+
+			// Dump last kruskal model
+		} // All batchs are complete
+
+		DestroySparseTensor(X);
+		destroy_grams(grams, M);
+		DestroyKruskalModel(M);
+		DestroyKruskalModel(prev_M);
+		return 0;
 	}
 }
 

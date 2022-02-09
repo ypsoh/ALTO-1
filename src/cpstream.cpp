@@ -84,8 +84,8 @@ void cpstream(
                 grams[streaming_mode]->vals[i] = 0.0;
             }
         } else {
-            GrowKruskalModel(t_batch->dims, &M, FILL_RANDOM); // Expands the kruskal model to accomodate new dimensions
-            GrowKruskalModel(t_batch->dims, &prev_M, FILL_ZEROS); // Expands the kruskal model to accomodate new dimensions
+            GrowKruskalModel(t_batch->dims, &M, FILL_RANDOM, seed); // Expands the kruskal model to accomodate new dimensions
+            GrowKruskalModel(t_batch->dims, &prev_M, FILL_ZEROS, seed); // Expands the kruskal model to accomodate new dimensions
 
             for (int j = 0; j < M->mode; ++j) {
                 if (j != streaming_mode) {
@@ -326,20 +326,14 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
         PrintFPMatrix("mttkrp before s_t", M->U[streaming_mode], 1, rank);
 #endif
 
-        PrintFPMatrix("s_t: before solve", M->U[streaming_mode], rank, 1);
-
         BEGIN_TIMER(&ts);
         // Init gram matrix aTa for all other modes
         
         // pseudo_inverse_stream(
         //   grams, M, streaming_mode, streaming_mode);
-        fprintf(stderr, "right before admm\n");
         admm(streaming_mode, M, grams, NULL, con, ws);
-        fprintf(stderr, "right after admm\n");
         END_TIMER(&te);
         AGG_ELAPSED_TIME(ts, te, &t_bs_sm);
-
-        PrintFPMatrix("s_t: after solve", M->U[streaming_mode], rank, 1);
 
 #if DEBUG == 1
         PrintFPMatrix("s_t: after solve", M->U[streaming_mode], rank, 1);
