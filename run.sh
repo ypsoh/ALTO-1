@@ -41,5 +41,10 @@ source /packages/intel/19/linux/pkg_bin/compilervars.sh -arch intel64 -platform 
 #make && ./cpd128 --rank 16 -m 100 -a 3 -l spcpstream_alto -i ~/hpctensor/sm_flickr.tns
 
 
-make && ./cpd128 --rank 16 -m 100 -a 3 -l $1 -x 44 -i ~/hpctensor/sm_flickr.tns
+#make && ./cpd128 --rank 16 -m 100 -a 3 -l $1 -x 44 -i ~/hpctensor/sm_flickr.tns
+#make && ./cpd128 --rank 16 -m 100 -a 3 -l $1 -z nonneg -i ~/hpctensor/sm_flickr.tns
+#make && ./cpd128 --rank 16 -m 100 -a 3 -l $1 -z nonneg -i ~/hpctensor/sm_flickr.tns
+#make && ./cpd128 --rank 16 -m 100 -a 3 -l $1 -z nonneg -i ~/hpctensor/sm_flickr.tns
 # make && ./cpd128 --rank 16 -m 100 -a 3 -l cpstream_alto -i ~/hpctensor/sm_flickr.tns
+
+make && ./cpd128 --rank 16 -m 100 -a 0 -l $1 -z nonneg -i ~/hpctensor/uber.tns

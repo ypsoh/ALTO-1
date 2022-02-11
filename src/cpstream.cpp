@@ -98,14 +98,14 @@ void cpstream(
         // Change to StreamMatrix later on
         int max_dim = 0;
         for (int m = 0; m < nmodes; ++m) {
-          ws->duals[m] = init_mat(t_batch->dims[m], rank);
+          ws->duals[m] = zero_mat(t_batch->dims[m], rank);
           if (t_batch->dims[m] > max_dim) {
             max_dim = t_batch->dims[m];
           }
         }
-        ws->mttkrp_buf = init_mat(max_dim, rank);
-        ws->auxil = init_mat(max_dim, rank);
-        ws->mat_init = init_mat(max_dim, rank);
+        ws->mttkrp_buf = zero_mat(max_dim, rank);
+        ws->auxil = zero_mat(max_dim, rank);
+        ws->mat_init = zero_mat(max_dim, rank);
 
 #if TIMER == 1
         END_TIMER(&te);
@@ -128,6 +128,7 @@ void cpstream(
                 t_batch, M, prev_M, grams,
                 max_iters, epsilon, streaming_mode, it, con, ws, use_alto);
         }
+        // if (it == 1) exit(1);
 #if TIMER == 1
         END_TIMER(&te);
         ELAPSED_TIME(ts, te, &t_iter);
@@ -310,15 +311,29 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
         delta = 0.0;
         delta_diff = 0.0;
         // Solve for time mode (s_t)
+
+        // Swap mttkrp_buf matrix with M->U[m] matrix
+
+        // Store orig factor matrix vals
+        FType * tmp_vals = M->U[streaming_mode];
+        // Point mttkrp_buf vals to factor matrix
+        // mttkrp kernel updates M->U[m]->vals directly
+        M->U[streaming_mode] = ws->mttkrp_buf->vals;
+
         // set to zero
-        memset(ws->mttkrp_buf->vals, 0, sizeof(FType) * rank);
+        memset(M->U[streaming_mode], 0, sizeof(FType) * rank);
         BEGIN_TIMER(&ts);
         if (use_alto) {
             mttkrp_alto_par(streaming_mode, M->U, rank, AT, NULL, ofibs);
+            // memcpy(ws->mttkrp_buf->vals, M->U[streaming_mode], rank * sizeof(FType));
         }
         else {
-            mttkrp_par(X, M, streaming_mode, writelocks, ws);
+            mttkrp_par(X, M, streaming_mode, writelocks);
+            // memcpy(ws->mttkrp_buf->vals, M->U[streaming_mode], rank * sizeof(FType));
         }
+        ws->mttkrp_buf->vals = M->U[streaming_mode];
+        M->U[streaming_mode] = tmp_vals;
+
         END_TIMER(&te);
         AGG_ELAPSED_TIME(ts, te, &t_mttkrp_sm);
 
@@ -366,7 +381,7 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 
             BEGIN_TIMER(&ts);
             memset(ws->mttkrp_buf->vals, 0, sizeof(FType) * dims[j] * rank);
-
+            // memset(M->U[j], 0, sizeof(FType) * dims[j] * rank);
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_memset);
 
@@ -379,11 +394,20 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
 #endif
 
             BEGIN_TIMER(&ts);
+
+            FType * tmp_vals = M->U[j];
+            M->U[j] = ws->mttkrp_buf->vals;
+
             if (use_alto) {
                 mttkrp_alto_par(j, M->U, rank, AT, NULL, ofibs);
+                // memcpy(ws->mttkrp_buf->vals, M->U[j], sizeof(FType) * dims[j] * rank);
             } else {
-                mttkrp_par(X, M, j, writelocks, ws);
+                mttkrp_par(X, M, j, writelocks);
+                // memcpy(ws->mttkrp_buf->vals, M->U[j], sizeof(FType) * dims[j] * rank);
             }
+            ws->mttkrp_buf->vals = M->U[j];
+            M->U[j] = tmp_vals;
+
             END_TIMER(&te);
             AGG_ELAPSED_TIME(ts, te, &t_mttkrp_om);
 
@@ -485,14 +509,14 @@ void cpstream_iter(SparseTensor* X, KruskalModel* M, KruskalModel * prev_M,
           prev_delta = 0.0;
           prev_delta_diff = 0.0;
           break;
-        } 
+        }
 #endif
         else {
           prev_delta = delta;
           prev_delta_diff = delta_diff;
         }
     } // for max_iters
-
+    // if (iter == 1) exit(1);
     num_inner_iter += tmp_iter;
 
     // incorporate forgetting factor

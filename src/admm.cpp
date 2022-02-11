@@ -110,7 +110,7 @@ FType admm(
     FType rho = mat_trace(Phi) / (FType) rank;
     
     // Debug
-    PrintMatrix("Phi matrix", Phi);
+    // PrintMatrix("Phi matrix", Phi);
     for (int i = 0; i < rank; ++i) {
         Phi->vals[i * rank + i] += rho;
         // Phi->vals[i * rank + i] += 1e-12;
@@ -133,7 +133,6 @@ FType admm(
     FType * primal = factor_matrix->vals;
 
     int N = M->dims[mode] * rank;
-
     size_t bytes = N * sizeof(*primal);
 
     // Set up norm
@@ -144,7 +143,7 @@ FType admm(
 
     // ADMM subroutine
     IType it;
-    for (it = 0; it < 25; ++it) {
+    for (it = 0; it < 100; ++it) {
         memcpy(mat_init, primal, bytes);
         // Setup auxiliary
         #pragma omp parallel for schedule(static)
@@ -161,7 +160,7 @@ FType admm(
             primal[i] = auxil[i] - dual[i];
         }
 
-        PrintMatrix("factor matrix after constraint", factor_matrix);
+        // PrintMatrix("factor matrix after constraint", factor_matrix);
         // Apply Constraints and Regularization
         // PrintFPMatrix("primal before", primal, factor_matrix->I, factor_matrix->J);
         con->func(primal, factor_matrix->I, factor_matrix->J);
@@ -197,15 +196,13 @@ FType admm(
             }
         }
 
-        fprintf(stderr, "p_res, p_norm, d_res, d_nrom, %f, %f, %f, %f\n", primal_residual, primal_norm, dual_residual, dual_norm);
+        // fprintf(stderr, "p_res, p_norm, d_res, d_nrom, %f, %f, %f, %f\n", primal_residual, primal_norm, dual_residual, dual_norm);
         // Converged ?
         if ((primal_residual <= 0.07 * primal_norm) && (dual_residual <= 0.07 * dual_norm)) {
             ++it;
             break;
         }
     }
-
-    fprintf(stderr, "it: %d\n", it);
     return it;
     // return 0.0;
 }
